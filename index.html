@@ -2021,11 +2021,14 @@ W3.textTex = [];
 W3.redrawText = function () { for (const r of W3.textTex) { r.c.setTransform(1, 0, 0, 1, 0, 0); r.c.clearRect(0, 0, r.w, r.h); r.draw(r.c, r.w, r.h); r.t.needsUpdate = true; } };
 function mesh(geo, mat, x = 0, y = 0, z = 0, cast = true) { const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.castShadow = cast; m.receiveShadow = true; return m; }
 const G = { // 共用幾何
-  box: new THREE.BoxGeometry(1, 1, 1), sph: new THREE.SphereGeometry(1, 16, 12), sphLo: new THREE.SphereGeometry(1, 10, 8),
+  box: new THREE.BoxGeometry(1, 1, 1), sph: new THREE.SphereGeometry(1, 16, 12), sphLo: new THREE.SphereGeometry(1, 10, 8), sphHi: new THREE.SphereGeometry(1, 28, 20),
   cyl: new THREE.CylinderGeometry(1, 1, 1, 12), cyl6: new THREE.CylinderGeometry(1, 1, 1, 6), ico: new THREE.IcosahedronGeometry(1, 1),
+  cylHi: new THREE.CylinderGeometry(1, 1, 1, 22),
+  // 柱礎：鼓形石座（上窄下寬、腰部微鼓）
+  plinth: new THREE.LatheGeometry([[0, 0], [.14, 0], [.145, .02], [.13, .05], [.112, .075], [.092, .088], [0, .088]].map(([r, y]) => new THREE.Vector2(r, y)), 22),
 };
 function bx(w, h, d, mat, x, y, z, cast = true) { const m = mesh(G.box, mat, x, y, z, cast); m.scale.set(w, h, d); return m; }
-function cy(r, h, mat, x, y, z, seg) { const m = mesh(seg === 6 ? G.cyl6 : G.cyl, mat, x, y, z); m.scale.set(r, h, r); return m; }
+function cy(r, h, mat, x, y, z, seg) { const m = mesh(seg === 6 ? G.cyl6 : seg === 22 ? G.cylHi : G.cyl, mat, x, y, z); m.scale.set(r, h, r); return m; }
 function sp(rx, ry, rz, mat, x, y, z, lo) { const m = mesh(lo ? G.sphLo : G.sph, mat, x, y, z); m.scale.set(rx, ry, rz); return m; }
 /* 兩點之間的圓柱（竹竿、橫桿） */
 function rod(a, b, r, mat, seg = 8) {
@@ -2043,14 +2046,33 @@ function plainKey(m) {
 // 粗糙度、金屬度分兩級，讓更多零件共用同一材質
 const qRough = m => m.roughness < .55 ? .42 : .86, qMetal = m => m.metalness > .2 ? .5 : 0;
 function vcMat(m) { const k = plainKey(m); if (VC_MATS[k]) return VC_MATS[k]; const v = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: qRough(m), metalness: qMetal(m), flatShading: m.flatShading, side: m.side }); if (m.userData.occlude) occlusionify(v); return VC_MATS[k] = v; }
-function bucketAdd(buckets, o, g, ch) {
+/* ao = true（場景靜物）：把「接地變暗、底面變暗」烘進頂點色；有貼圖的材質加上凹凸 */
+function bucketAdd(buckets, o, g, ch, ao) {
   if (!g.attributes.normal) g.computeVertexNormals();
   const pk = plainKey(o.material); let mat = o.material, key = o.material.uuid;
-  if (pk) { const c = o.material.color, n = g.attributes.position.count, a = new Float32Array(n * 3); for (let i = 0; i < n; i++) { a[i * 3] = c.r; a[i * 3 + 1] = c.g; a[i * 3 + 2] = c.b; } g.setAttribute('color', new THREE.BufferAttribute(a, 3)); mat = ch ? vcMatChar(o.material) : vcMat(o.material); key = (ch ? 'ch|' : '') + pk; }
+  if (pk) {
+    const c = o.material.color, n = g.attributes.position.count, a = new Float32Array(n * 3), P = g.attributes.position, N = g.attributes.normal;
+    const leaf = o.material.userData.leaf;
+    for (let i = 0; i < n; i++) {
+      let f = 1;
+      if (ao) {
+        const y = P.getY(i), up = N.getY(i) * .5 + .5; f = (.6 + .4 * smooth01(y / .5)) * (.82 + .18 * up);
+        if (leaf) f *= (.8 + .2 * up) * (.88 + .24 * vnoise(P.getX(i) * 2.2, P.getZ(i) * 2.2 + y * 1.7, 13)); // 樹冠：下方較暗、葉色深淺不一
+      }
+      a[i * 3] = c.r * f; a[i * 3 + 1] = c.g * f; a[i * 3 + 2] = c.b * f;
+    }
+    g.setAttribute('color', new THREE.BufferAttribute(a, 3)); mat = ch ? vcMatChar(o.material) : vcMat(o.material); key = (ch ? 'ch|' : '') + pk;
+  }
   else if (ch) addRim(o.material);
+  else if (ao) addBump(o.material);
   key += '|' + (o.castShadow ? 1 : 0);
   if (!buckets.has(key)) buckets.set(key, { mat, cast: o.castShadow, list: [] });
   buckets.get(key).list.push(g);
+}
+/* 貼圖兼作凹凸貼圖：瓦片、木紋、石縫、窗櫺都有立體感（幾乎不增加記憶體） */
+function addBump(m) {
+  if (!m || !m.isMeshStandardMaterial || !m.map || m.bumpMap || m.transparent || m.alphaTest || m.userData.noBump) return;
+  m.bumpMap = m.map; m.bumpScale = m.userData.bump ?? .75; m.needsUpdate = true;
 }
 /* 只合併 grp 的直接子網格（人物的各關節用；保留子群組以便動畫） */
 /* 人物材質：邊緣光讓 Q 版人物輪廓柔亮、和背景分開 */
@@ -2077,7 +2099,7 @@ function mergeGroup(root) {
     if (!o.isMesh) return;
     if (Array.isArray(o.material)) { const c = new THREE.Mesh(o.geometry.clone(), o.material); c.applyMatrix4(o.matrixWorld); c.castShadow = o.castShadow; c.receiveShadow = true; keep.push(c); return; } // 多重材質（石碑）保留原樣
     const g = o.geometry.index ? o.geometry.toNonIndexed() : o.geometry.clone();
-    g.applyMatrix4(o.matrixWorld); bucketAdd(buckets, o, g);
+    g.applyMatrix4(o.matrixWorld); bucketAdd(buckets, o, g, false, true);
   });
   const out = new THREE.Group(); for (const m of bucketsToMeshes(buckets)) out.add(m); for (const m of keep) out.add(m); return out;
 }
@@ -2187,12 +2209,36 @@ function paintGround(N) {
       for (let i = 0; i < 14; i++) { const u = r(), off = rrand(r, -.1, .12); const px = (dx ? (dx > 0 ? x + 1 + off : x - off) : x + u) * k, py = (dy ? (dy > 0 ? y + 1 + off : y - off) : y + u) * k; c.fillStyle = r() < .5 ? shade(base, .85) : shade(base, 1.08); c.beginPath(); c.ellipse(px, py, rrand(r, 2, 6) * k / 60, rrand(r, 1.5, 4) * k / 60, r() * 3, 0, TAU); c.fill(); }
     }
   }
+  paintAO(c, k);
   // 祠前嵌石太極
   { const cx = 18.4 * k, cz = 9.2 * k, s = .78 * k; c.save(); c.translate(cx, cz); c.scale(s, s);
     c.fillStyle = '#cfc8b4'; c.beginPath(); c.arc(0, 0, 1.55, 0, TAU); c.fill(); c.strokeStyle = '#b8913e'; c.lineWidth = .04; c.beginPath(); c.arc(0, 0, 1.47, 0, TAU); c.stroke(); c.beginPath(); c.arc(0, 0, 1.06, 0, TAU); c.stroke();
     RING_ORDER.forEach((nm, i) => { const tg = TRIGRAMS.find(q => q.n === nm), a = -Math.PI / 2 - i * Math.PI / 4; drawTrigram(c, Math.cos(a) * 1.27, Math.sin(a) * 1.27, tg.b, .36, .065, .1, '#3a4446', a + Math.PI / 2); });
     drawTaiji(c, 0, 0, .95, 0, '#efe8d6', '#2c3a3c'); c.restore(); }
   const t = new THREE.CanvasTexture(cv); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = W3.aniso; return t;
+}
+/* 烘焙接地陰影：建築、牆、樹、道具四周的地面柔和變暗（畫進地面貼圖，執行時不耗效能）
+   做法：把形狀畫在畫布外，只讓它的模糊陰影落在正確位置 */
+function paintAO(c, k) {
+  const off = c.canvas.width + 800;
+  c.save(); c.shadowOffsetX = off; c.shadowOffsetY = 0; c.fillStyle = '#000'; c.strokeStyle = '#000';
+  const sh = (a, blur) => { c.shadowColor = `rgba(36,27,14,${a})`; c.shadowBlur = blur * k; };
+  const rect = (x0, y0, x1, y1, a, blur) => { sh(a, blur); c.fillRect(x0 * k - off, y0 * k, (x1 - x0) * k, (y1 - y0) * k); };
+  const disk = (x, y, r, a, blur) => { sh(a, blur); c.beginPath(); c.arc(x * k - off, y * k, r * k, 0, TAU); c.fill(); };
+  for (const o of OBJ) {
+    const s = o.s || 1;
+    switch (o.type) {
+      case 'bld': { const p = o.plat, e = p ? p.ext : 0; rect(o.x0 - e - .03, o.y0 - e - .03, o.x1 + e + (p && p.ex || 0) + .03, o.y1 + e + (p && p.ey || 0) + .03, .5, .45); break; }
+      case 'earthWall': rect(o.x0 - .02, o.y0 - .02, o.x1 + .02, o.y1 + .02, .45, .32); break;
+      case 'stall': case 'shed': case 'cage': rect(o.x0 + .05, o.y0 + .05, o.x1 - .05, o.y1 - .05, .3, .5); break;
+      case 'tree': disk(o.x, o.y, (o.kind === 'bush' ? .34 : o.kind === 'bamboo' ? .4 : .44) * s, .34, .55); break;
+      case 'fence': sh(.26, .16); c.lineWidth = .06 * k; c.beginPath(); c.moveTo(o.x0 * k - off, o.y0 * k); c.lineTo(o.x1 * k - off, o.y1 * k); c.stroke(); break;
+      case 'gate': for (const x of [o.x0, o.x1]) disk(x, o.y, .2, .45, .26); break;
+      case 'boat': case 'trigramBanner': break;
+      default: if (typeof o.x === 'number' && typeof o.y === 'number') disk(o.x, o.y, .24 * s, .3, .28);
+    }
+  }
+  c.restore();
 }
 function terrainH(x, z) {
   const d = seaD(clamp(x, -40, 80), clamp(z, -40, 80));
@@ -2211,19 +2257,20 @@ W3.init = function (cv) {
     renderer = new THREE.WebGLRenderer({ canvas: cv, antialias: !COARSE, alpha: true, powerPreference: 'high-performance' });
   } catch (e) { return false; }
   W3.ok = true; W3.aniso = Math.min(8, renderer.capabilities.getMaxAnisotropy());
-  renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 1.05;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = .94;
   renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   scene = new THREE.Scene();
-  scene.fog = new THREE.Fog(0xe6dcc2, 24, 78);
+  scene.fog = new THREE.Fog(0xe9dfc6, 26, 82);
   camera = new THREE.PerspectiveCamera(48, 1, .1, 400);
-  const hemi = new THREE.HemisphereLight(0xe4eef5, 0x7d8a4a, 1.15); scene.add(hemi);
-  sun = new THREE.DirectionalLight(0xffdcab, 2.7); sun.castShadow = true;
-  const sm = COARSE ? 1024 : 3072; sun.shadow.mapSize.set(sm, sm);
+  // 天光改由環境貼圖（buildEnv）提供，半球光只留一點打底
+  const hemi = new THREE.HemisphereLight(0xe4eef5, 0x7d8a4a, .5); scene.add(hemi); W3.hemi = hemi;
+  sun = new THREE.DirectionalLight(0xffdcab, 2.9); sun.castShadow = true;
+  const sm = COARSE ? 1536 : 3072; sun.shadow.mapSize.set(sm, sm);
   const sc = sun.shadow.camera, SR = COARSE ? 13 : 14; sc.left = -SR; sc.right = SR; sc.top = SR; sc.bottom = -SR; sc.near = 1; sc.far = 90;
-  sun.shadow.bias = -.0005; sun.shadow.normalBias = .03; sun.shadow.radius = 3;
+  sun.shadow.bias = -.0004; sun.shadow.normalBias = .025; sun.shadow.radius = 3;
   scene.add(sun); scene.add(sun.target);
   W3.sunDir = V3(.5, .72, .46).normalize(); // 太陽在東南，朝南的屋前受光
-  W3.fill = new THREE.DirectionalLight(0xfff2e0, .55); scene.add(W3.fill); scene.add(W3.fill.target); // 跟著鏡頭的補光，讓臉不背光
+  W3.fill = new THREE.DirectionalLight(0xfff2e0, .3); scene.add(W3.fill); scene.add(W3.fill.target); // 跟著鏡頭的補光，讓臉不背光（調弱，免得在頭髮上反出亮圈）
   return true;
 };
 W3.resize = function (w, h) {
@@ -2236,13 +2283,13 @@ W3.resize = function (w, h) {
 W3.build = function () {
   const statics = new THREE.Group(), tm = W3.buildTimes = {}; let t0 = performance.now();
   const lap = k => { const t = performance.now(); tm[k] = Math.round(t - t0); t0 = t; };
-  buildSky(); lap('sky'); buildTerrain(statics); lap('terrain'); buildWater(); lap('water');
+  buildSky(); buildEnv(); lap('sky'); buildTerrain(statics); lap('terrain'); buildWater(); lap('water');
   const per = {};
   for (const o of OBJ) { const a = performance.now(); try { BUILD3D[o.type] && BUILD3D[o.type](o, statics); } catch (e) { console.error('build', o.type, e); } per[o.type] = (per[o.type] || 0) + performance.now() - a; }
   lap('objects'); tm.per = Object.fromEntries(Object.entries(per).filter(([, v]) => v > 40).map(([k, v]) => [k, Math.round(v)]));
   buildPier(statics);
   const merged = mergeGroup(statics); scene.add(merged); lap('merge');
-  statics.traverse(o => { if (o.isMesh && o.geometry !== G.box && o.geometry !== G.sph && o.geometry !== G.cyl && o.geometry !== G.sphLo && o.geometry !== G.cyl6 && o.geometry !== G.ico) o.geometry.dispose(); });
+  const sharedG = new Set(Object.values(G)); statics.traverse(o => { if (o.isMesh && !sharedG.has(o.geometry)) o.geometry.dispose(); });
   buildGrass(); buildFlowers(); lap('grass'); buildShrineMagic(); buildAmbient(); lap('magic');
 };
 function buildSky() {
@@ -2267,6 +2314,31 @@ function buildSky() {
   tex.wrapS = THREE.RepeatWrapping;
   const ring = new THREE.Mesh(new THREE.CylinderGeometry(200, 200, 70, 64, 1, true), new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.BackSide, fog: false, depthWrite: false }));
   ring.position.set(18, 18, 18); ring.renderOrder = -9; scene.add(ring);
+  // 遠方的雲：幾片柔和的雲朵
+  const cloudTex = canvasTex(256, 128, (c, w, h) => {
+    const r = mulberry32(88);
+    for (let i = 0; i < 30; i++) { const x = rrand(r, w * .14, w * .86), y = rrand(r, h * .42, h * .68), rad = rrand(r, 16, 36) * (1.1 - Math.abs(x / w - .5)); const g = c.createRadialGradient(x, y, 1, x, y, rad); g.addColorStop(0, 'rgba(255,253,246,.5)'); g.addColorStop(.6, 'rgba(255,253,246,.22)'); g.addColorStop(1, 'rgba(255,253,246,0)'); c.fillStyle = g; c.fillRect(x - rad, y - rad, rad * 2, rad * 2); }
+  });
+  const cr = mulberry32(31);
+  for (let i = 0; i < 10; i++) {
+    const a = i / 10 * TAU + cr() * .5, d = rrand(cr, 170, 240), s = new THREE.Sprite(new THREE.SpriteMaterial({ map: cloudTex, transparent: true, depthWrite: false, fog: false, opacity: rrand(cr, .6, .9) }));
+    s.position.set(18 + Math.cos(a) * d, rrand(cr, 50, 95), 18 + Math.sin(a) * d); const sc = rrand(cr, 80, 130); s.scale.set(sc, sc * .38, 1); s.renderOrder = -8; scene.add(s);
+  }
+}
+/* 環境光（IBL）：把天空漸層烘成模糊的環境貼圖，所有材質都會有自然的天光與柔和反光 */
+function buildEnv() {
+  try {
+    const pm = new THREE.PMREMGenerator(renderer), es = new THREE.Scene();
+    const mat = new THREE.ShaderMaterial({
+      side: THREE.BackSide, depthWrite: false,
+      uniforms: { uTop: { value: new THREE.Color('#78acd6') }, uHor: { value: new THREE.Color('#f3e4c6') }, uGnd: { value: new THREE.Color('#8a8458') }, uSun: { value: W3.sunDir.clone() }, uK: { value: .62 } },
+      vertexShader: 'varying vec3 vP; void main(){ vP = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.); }',
+      fragmentShader: 'uniform vec3 uTop; uniform vec3 uHor; uniform vec3 uGnd; uniform vec3 uSun; uniform float uK; varying vec3 vP; void main(){ float y = vP.y; vec3 c = y > 0. ? mix(uHor, uTop, pow(clamp(y, 0., 1.), .6)) : mix(uHor * .85, uGnd, clamp(-y * 3., 0., 1.)); float s = max(dot(vP, uSun), 0.); c += vec3(1., .86, .62) * (pow(s, 48.) * 2.5 + pow(s, 5.) * .3); gl_FragColor = vec4(c * uK, 1.); }'
+    });
+    es.add(new THREE.Mesh(new THREE.SphereGeometry(5, 48, 24), mat));
+    const rt = pm.fromScene(es, 0, .1, 20); scene.environment = rt.texture; W3.envRT = rt;
+    pm.dispose(); mat.dispose();
+  } catch (e) { console.warn('env', e); }
 }
 function buildTerrain(statics) {
   const N = COARSE ? 2048 : 3072;
@@ -2274,7 +2346,7 @@ function buildTerrain(statics) {
   const seg = 108, geo = new THREE.PlaneGeometry(MW, MH, seg, seg); geo.rotateX(-Math.PI / 2); geo.translate(MW / 2, 0, MH / 2);
   const p = geo.attributes.position; for (let i = 0; i < p.count; i++) p.setY(i, terrainH(p.getX(i), p.getZ(i)));
   geo.computeVertexNormals();
-  const t = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ map: tex, roughness: .96 })); t.receiveShadow = true; scene.add(t); W3.terrain = t;
+  const t = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ map: tex, roughness: .96, bumpMap: COARSE ? null : tex, bumpScale: .7 })); t.receiveShadow = true; scene.add(t); W3.terrain = t;
   // 外圍丘陵（村子坐落在山谷中）
   const og = new THREE.PlaneGeometry(164, 164, 82, 82); og.rotateX(-Math.PI / 2); og.translate(18, 0, 18);
   const op = og.attributes.position, cols = new Float32Array(op.count * 3);
@@ -2306,7 +2378,7 @@ function buildWater() {
   const SN = 160, X0 = -24, SZ = 84, data = new Uint8Array(SN * SN * 4);
   for (let j = 0; j < SN; j++) for (let i = 0; i < SN; i++) { const x = X0 + (i + .5) / SN * SZ, z = X0 + (j + .5) / SN * SZ, d = clamp(seaD(x, z), 0, 25.5), k = (j * SN + i) * 4; data[k] = Math.round(d * 10); data[k + 3] = 255; }
   const dt = new THREE.DataTexture(data, SN, SN, THREE.RGBAFormat); dt.magFilter = THREE.LinearFilter; dt.minFilter = THREE.LinearFilter; dt.needsUpdate = true;
-  const mat = new THREE.MeshStandardMaterial({ color: 0x4f97a4, roughness: .18, metalness: .05, transparent: true, opacity: .86 });
+  const mat = new THREE.MeshStandardMaterial({ color: 0x4f97a4, roughness: .16, metalness: .05, transparent: true, opacity: .86, envMapIntensity: .35 }); // 天空倒影淡淡的，保留海水的青綠色
   mat.onBeforeCompile = sh => {
     sh.uniforms.uTime = W3.uTime = { value: 0 }; sh.uniforms.uShore = { value: dt };
     sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nvarying vec3 vWP;').replace('#include <worldpos_vertex>', '#include <worldpos_vertex>\nvWP = (modelMatrix * vec4(transformed,1.)).xyz;');
@@ -2339,6 +2411,10 @@ function wallCanvasTex(b, gable, featFace, lenTiles, TSc) {
     const keep = [LF.L, LF.R]; LF.L = 1; LF.R = 1;
     c.scale(TS, TS); c.translate(0, Hp + 1); drawWallFace(c, b2, fKey, Wpx);
     LF.L = keep[0]; LF.R = keep[1];
+    // 牆腳接地處與屋簷下各加一層柔和陰影
+    c.setTransform(TS, 0, 0, TS, 0, (Hp + 1) * TS);
+    let g = c.createLinearGradient(0, 0, 0, -24); g.addColorStop(0, 'rgba(30,20,10,.42)'); g.addColorStop(1, 'rgba(30,20,10,0)'); c.fillStyle = g; c.fillRect(0, -24, Wpx, 25);
+    const top = -b.wallH; g = c.createLinearGradient(0, top, 0, top + 16); g.addColorStop(0, 'rgba(30,20,10,.3)'); g.addColorStop(1, 'rgba(30,20,10,0)'); c.fillStyle = g; c.fillRect(0, top, Wpx, 16);
   }, false, feats.some(ft => ft.t === 'sign' || ft.couplet));
 }
 function faceGeo(O, U, Lu, Hw, Hg, Htot) {
@@ -2379,7 +2455,8 @@ function gableRoof(b, grp, opt = {}) {
   const P3 = (a, c, y) => ax === 'x' ? [a, y, c] : [c, y, a];
   const kind = b.roof, base = b.roofC || ROOF_THATCH;
   const tex = kind === 'thatch' ? texThatch(base) : texTile(base, kind === 'glaze');
-  const mat = new THREE.MeshStandardMaterial({ map: tex, roughness: kind === 'glaze' ? .35 : kind === 'thatch' ? .95 : .78, metalness: kind === 'glaze' ? .15 : 0, side: THREE.DoubleSide });
+  const mat = new THREE.MeshStandardMaterial({ map: tex, roughness: kind === 'glaze' ? .3 : kind === 'thatch' ? .95 : .74, metalness: kind === 'glaze' ? .12 : 0, side: THREE.DoubleSide });
+  mat.userData.bump = kind === 'thatch' ? 1.6 : 1.1;
   const rep = kind === 'thatch' ? .9 : 1.5, na = 24, nc = 8, slope = Math.hypot(half + oh, top - zE);
   for (const s of [-1, 1]) {
     const pos = [], uv = [], idx = [];
@@ -2437,7 +2514,7 @@ BUILD3D.bld = function (b, statics) {
   buildWalls(b, grp);
   if (b.cols) {
     const c = b.cols, h = c.h * PX, cm = M(c.color || '#9b2d1f', { roughness: .55 }), pos = u => c.f === 'L' ? [b.x0 + u, b.y1 + c.off] : [b.x1 + c.off, b.y1 - u];
-    for (const u of c.us) { const [x, z] = pos(u); grp.add(cy(.075, h, cm, x, z0 + h / 2, z)); grp.add(cy(.12, .08, M('#a19d92'), x, z0 + .04, z)); grp.add(bx(.2, .08, .2, M('#3b2617'), x, z0 + h - .02, z)); }
+    for (const u of c.us) { const [x, z] = pos(u); grp.add(cy(.075, h, cm, x, z0 + h / 2, z, 22)); grp.add(mesh(G.plinth, M('#a19d92', { roughness: .8 }), x, z0, z)); grp.add(bx(.2, .08, .2, M('#3b2617'), x, z0 + h - .02, z)); }
     const [ax_, az] = pos(c.us[0] - .15), [bx_, bz] = pos(c.us[c.us.length - 1] + .15);
     const beam = rod(V3(ax_, z0 + h + .02, az), V3(bx_, z0 + h + .02, bz), .055, M('#6e2618'), 6); grp.add(beam);
     const beam2 = rod(V3(ax_, z0 + h - .1, az), V3(bx_, z0 + h - .1, bz), .03, M('#3f7f78', { roughness: .5 }), 6); grp.add(beam2);
@@ -2633,7 +2710,7 @@ const TREEPAL = {
 };
 function makeTree(kind, seed, s = 1) {
   const r = mulberry32(seed), g = new THREE.Group(), pal = TREEPAL[kind] || TREEPAL.broad;
-  const trunkM = TM('#6a4a32', { roughness: .95 }), leafM = pal.map(c => TM(c, { roughness: .9 }));
+  const trunkM = TM('#6a4a32', { roughness: .95 }), leafM = pal.map(c => TM(c, { roughness: .9 })); leafM.forEach(m => m.userData.leaf = true);
   if (kind === 'bamboo') {
     const bm = TM('#ffffff', { map: texWall('#a8b04c', 'bamboo') }), lm = TM('#6d9a3a', { side: THREE.DoubleSide, roughness: .9 }), lm2 = TM('#9cc458', { side: THREE.DoubleSide, roughness: .9 });
     const n = 6 + Math.floor(r() * 4);
@@ -2957,16 +3034,43 @@ function clothTex(C, long) {
     if (long) { c.fillStyle = shade(C.robe, .82); c.fillRect(0, bh + 10, w, 4); }
   }, true);
 }
+/* 髮帶幾何：從髮結沿著半徑 R 的後腦弧面往下，末端略微翹起、兩條向外散開（座標以髮結為原點） */
+function ribbonGeo(hc, R, knot, s, len = .2, w = .034, n = 12) {
+  const pos = [], uv = [], idx = [], k = knot.clone().sub(hc), th0 = Math.atan2(-k.z, k.y), d = V3(0, 0, 0);
+  for (let i = 0; i <= n; i++) {
+    const f = i / n, rr = R + f * f * .03, th = th0 + f * len / R, xc = s * (.014 + f * .05);
+    for (const e of [-1, 1]) {
+      d.set(xc + e * w / 2, Math.cos(th) * rr, -Math.sin(th) * rr).normalize().multiplyScalar(rr).add(hc).sub(knot);
+      pos.push(d.x, d.y, d.z); uv.push((e + 1) / 2, 1 - f);
+    }
+    if (i < n) { const q = i * 2; idx.push(q, q + 1, q + 2, q + 1, q + 3, q + 2); }
+  }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); g.setIndex(idx); g.computeVertexNormals(); return g;
+}
+/* 頭髮貼圖：灰白底上的細髮絲（乘上髮色），霧面，不會出現一圈亮斑 */
+let HAIR_TEX = null;
+function hairTex() {
+  if (HAIR_TEX) return HAIR_TEX;
+  return HAIR_TEX = canvasTex(256, 128, (c, w, h) => {
+    c.fillStyle = '#ededed'; c.fillRect(0, 0, w, h);
+    const r = mulberry32(512);
+    for (let i = 0; i < 560; i++) {
+      const x = r() * w, L = h * rrand(r, .35, 1), y0 = r() * (h - L * .5), lt = r() < .5;
+      c.strokeStyle = lt ? `rgba(255,255,255,${rrand(r, .3, .7)})` : `rgba(70,70,70,${rrand(r, .18, .42)})`; c.lineWidth = rrand(r, .6, 1.5);
+      c.beginPath(); c.moveTo(x, y0); c.bezierCurveTo(x + rrand(r, -3, 3), y0 + L * .33, x + rrand(r, -3, 3), y0 + L * .66, x + rrand(r, -4, 4), y0 + L); c.stroke();
+    }
+  }, true);
+}
 function lathe(points, segs, mat) { const g = new THREE.LatheGeometry(points.map(([r, y]) => new THREE.Vector2(r, y)), segs); const m = new THREE.Mesh(g, mat); m.castShadow = false; m.receiveShadow = true; return m; }
 function rx(m, a) { m.rotation.x = a; return m; }
 function part(geo, mat, x = 0, y = 0, z = 0) { const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.receiveShadow = true; return m; }
-function ellip(rx, ry, rz, mat, x, y, z) { const m = part(G.sph, mat, x, y, z); m.scale.set(rx, ry, rz); return m; }
+function ellip(rx, ry, rz, mat, x, y, z) { const m = part(G.sphHi, mat, x, y, z); m.scale.set(rx, ry, rz); return m; } // 人物與動物用較圓滑的球
 function profileR(prof, y) { for (let i = 0; i < prof.length - 1; i++) { const [r0, y0] = prof[i], [r1, y1] = prof[i + 1]; if ((y <= y0 && y >= y1) || (y >= y0 && y <= y1)) return lerp(r0, r1, (y - y0) / ((y1 - y0) || 1)); } return prof[prof.length - 1][0]; }
 function makeCharacter(look) {
   const C = look.c, B = B3[look.build || 'youth'], fat = look.fat ? 1.28 : 1, long = !!look.long;
   const root = new THREE.Group(), body = new THREE.Group(); root.add(body);
   const mRobe = M(C.robe, { roughness: .82 }), mTrim = M(C.trim || '#f2eee4', { roughness: .8 }), mSash = M(C.sash || '#d6c49c', { roughness: .85 });
-  const mSkin = M(C.skin || '#f3d0b2', { roughness: .7 }), mHair = M(C.hair || '#2c1f18', { roughness: .5 }), mPants = M(C.pants || '#efe9dc', { roughness: .9 });
+  const mSkin = M(C.skin || '#f3d0b2', { roughness: .7 }), mHair = M(C.hair || '#2c1f18', { map: hairTex(), roughness: .68 }), mPants = M(C.pants || '#efe9dc', { roughness: .9 });
   const mWrap = M(C.wrap || '#cfc6b6'), mShoe = M(C.shoe || '#25201e', { roughness: .6 }), wrapC = C.hat || '#efe6d2', mBand = M(wrapC, { roughness: .8 });
   const tw = B.tw * (look.fat ? 1.12 : 1);
   // 腿
@@ -2984,10 +3088,10 @@ function makeCharacter(look) {
   // 衣身
   const hem = B.hem, prof = [[tw * .32, B.neck + .005], [tw * .78, B.sh + .03], [tw, B.sh - .02], [tw * 1.04, B.chest], [tw * .97 * fat, B.waist + .04], [tw * fat, B.waist], [tw * 1.15 * fat, B.waist - .06], [tw * 1.32 * fat, hem + .025], [tw * 1.36 * fat, hem]];
   if (long) prof.push([tw * 1.55 * fat, hem * .55], [tw * 1.74 * fat, .06], [tw * 1.78 * fat, .02]);
-  const torso = lathe(prof, 26, new THREE.MeshStandardMaterial({ map: clothTex(C, long), roughness: .82, side: THREE.DoubleSide })); torso.scale.z = .82; body.add(torso);
+  const ct = clothTex(C, long), torso = lathe(prof, 40, new THREE.MeshStandardMaterial({ map: ct, bumpMap: ct, bumpScale: .5, roughness: .82, side: THREE.DoubleSide })); torso.scale.z = .82; body.add(torso);
   // 下襬滾邊
   const hemY = long ? .02 : hem, hemR = profileR(prof, hemY);
-  const hemT = part(new THREE.TorusGeometry(hemR, .012, 4, 26), mTrim, 0, hemY + .01, 0); hemT.rotation.x = Math.PI / 2; hemT.scale.y = .82; body.add(hemT);
+  const hemT = part(new THREE.TorusGeometry(hemR, .012, 6, 40), mTrim, 0, hemY + .01, 0); hemT.rotation.x = Math.PI / 2; hemT.scale.y = .82; body.add(hemT);
   if (look.armor) { const ar = lathe([[tw * .8, B.sh + .02], [tw * 1.08, B.chest], [tw * 1.06, B.waist + .02]], 18, M(shade(C.robe, .75), { roughness: .5, metalness: .3 })); ar.scale.z = .86; body.add(ar); }
   if (C.apron) { const ap = part(new THREE.PlaneGeometry(tw * 1.5, B.waist - .08), M(C.apron, { side: THREE.DoubleSide }), 0, (B.waist + .08) / 2, profileR(prof, (B.waist + .1) / 2) * .82 + .012); body.add(ap); }
   // 交領
@@ -2998,7 +3102,7 @@ function makeCharacter(look) {
   body.add(rx(part(new THREE.ConeGeometry(.035, .07, 3), mSkin, 0, B.sh + .015, front(0, B.sh) - .012), Math.PI));
   // 腰帶
   const sashR = profileR(prof, B.waist) + .012;
-  const st = part(new THREE.TorusGeometry(sashR, .026, 6, 28), mSash, 0, B.waist, 0); st.rotation.x = Math.PI / 2; st.scale.y = .82; body.add(st);
+  const st = part(new THREE.TorusGeometry(sashR, .026, 8, 40), mSash, 0, B.waist, 0); st.rotation.x = Math.PI / 2; st.scale.y = .82; body.add(st);
   const kz = front(-.05, B.waist, .03); body.add(ellip(.032, .028, .02, M(shade(C.sash || '#d6c49c', .9)), -.05, B.waist, kz));
   const tailG = new THREE.Group(); tailG.position.set(-.05, B.waist - .01, kz); body.add(tailG);
   for (const [dx, len] of [[-.015, .13], [.015, .11]]) tailG.add(part(new THREE.BoxGeometry(.026, len, .008), M(shade(C.sash || '#d6c49c', .85)), dx, -len / 2, 0));
@@ -3021,15 +3125,15 @@ function makeCharacter(look) {
     const sh = new THREE.Group(); sh.position.set(s * (tw + .004), B.sh - .005, 0); body.add(sh); arms.push(sh);
     const rb = long ? .094 : .056, sm = M(shade(C.robe, s > 0 ? 1 : .94), long ? { roughness: .82, side: THREE.DoubleSide } : { roughness: .82 }); // 寬袖的 Lathe 法線朝內，需雙面
     if (long) { // 寬袖：袖口外張，下垂成袖袋
-      sh.add(part(new THREE.LatheGeometry([[.04, 0], [.05, -.07], [.068, -.15], [rb, -.21]].map(([q, y]) => new THREE.Vector2(q, y)), 14), sm));
+      sh.add(part(new THREE.LatheGeometry([[.04, 0], [.05, -.07], [.068, -.15], [rb, -.21]].map(([q, y]) => new THREE.Vector2(q, y)), 22), sm));
       sh.add(ellip(.075, .06, .05, sm, 0, -.225, -.035));
-    } else sh.add(part(new THREE.CylinderGeometry(.04, rb, .21, 12), sm, 0, -.105, 0));
-    const cf = part(new THREE.TorusGeometry(rb - .004, .012, 4, 16), mTrim, 0, -.21, 0); cf.rotation.x = Math.PI / 2; sh.add(cf);
+    } else { sh.add(part(new THREE.CylinderGeometry(.04, rb, .21, 20), sm, 0, -.105, 0)); sh.add(ellip(.04, .03, .04, sm, 0, 0, 0)); } // 肩頭圓順
+    const cf = part(new THREE.TorusGeometry(rb - .004, .012, 6, 24), mTrim, 0, -.21, 0); cf.rotation.x = Math.PI / 2; sh.add(cf);
     sh.add(ellip(.036, .036, .036, mSkin, 0, -.245, 0));
   }
   // 頭
   const head = new THREE.Group(); head.position.set(0, B.neck, 0); body.add(head);
-  head.add(part(new THREE.CylinderGeometry(.034, .04, .07, 10), mSkin, 0, .01, 0));
+  head.add(part(new THREE.CylinderGeometry(.034, .04, .07, 16), mSkin, 0, .01, 0));
   const hr = B.hr, hc = V3(0, B.hcy, 0);
   const faceMat = new THREE.MeshStandardMaterial({ map: faceTexture(look), roughness: .65 });
   const face = part(new THREE.SphereGeometry(hr, 36, 24), faceMat, 0, hc.y, 0); face.scale.set(1, .96, .97); head.add(face);
@@ -3039,8 +3143,8 @@ function makeCharacter(look) {
   const strand = (th, ph, len, rad, mat, out = .35) => { const p = onHead(th, ph, hr * 1.03), n = p.clone().sub(hc).normalize(), d = n.multiplyScalar(out).add(V3(0, -1, 0)).normalize(); const m = part(new THREE.ConeGeometry(rad, len, 6), mat); m.position.copy(p).addScaledVector(d, len * .45); m.quaternion.setFromUnitVectors(V3(0, -1, 0), d); head.add(m); return m; };
   const hat = look.hat || 'bun';
   if (hat !== 'helm') {
-    head.add(part(new THREE.SphereGeometry(hr * 1.055, 32, 14, 0, TAU, 0, 1.08), mHair, 0, hc.y, 0));
-    head.add(part(new THREE.SphereGeometry(hr * 1.07, 32, 16, Math.PI * .9, Math.PI * 1.2, 0, look.female ? 2.6 : 2.25), mHair, 0, hc.y, 0));
+    head.add(part(new THREE.SphereGeometry(hr * 1.055, 44, 16, 0, TAU, 0, 1.08), mHair, 0, hc.y, 0));
+    head.add(part(new THREE.SphereGeometry(hr * 1.07, 44, 22, Math.PI * .9, Math.PI * 1.2, 0, look.female ? 2.6 : 2.25), mHair, 0, hc.y, 0));
     for (const o of [-.62, -.36, -.12, .12, .36, .62]) strand(.8, Math.PI / 2 + o, .065 + Math.abs(o) * .035, .028, mHair, .45); // 瀏海：停在眉毛上方
     for (const s of [1, -1]) strand(1.3, Math.PI / 2 + s * 1.12, look.female ? .26 : .11, look.female ? .032 : .024, mHair, .15); // 鬢髮
     if (hat === 'loose') for (const o of [.35, 2.75, 3.3, 3.9, 4.5, 5.1, 5.7]) strand(1.55, o, .2, .035, mHair, .2); // 散髮只在兩側與腦後，不遮臉
@@ -3051,10 +3155,11 @@ function makeCharacter(look) {
   if (hat === 'bun' || hat === 'jin' || hat === 'band' || hat === 'loose') {
     bun(0, top + .035, -.03, hat === 'loose' ? .06 : .075);
     if (hat !== 'loose') {
-      const band = part(new THREE.TorusGeometry(.064, .021, 6, 16), mBand, 0, top + .005, -.028); band.rotation.x = Math.PI / 2; head.add(band);
-      const rg = new THREE.Group(); rg.position.set(0, top + .01, -.09); rg.rotation.x = .7; rg.userData.base = .7; head.add(rg); fx.ribbons.push(rg);
-      const rgeo = new THREE.PlaneGeometry(.035, .2); rgeo.translate(0, -.1, 0);
-      for (const s of [-1, 1]) { const rb = part(rgeo, M(wrapC, { side: THREE.DoubleSide, roughness: .8 }), s * .02, 0, 0); rb.rotation.z = s * .18; rg.add(rb); }
+      const band = part(new THREE.TorusGeometry(.064, .021, 8, 28), mBand, 0, top + .005, -.028); band.rotation.x = Math.PI / 2; head.add(band);
+      // 髮帶：貼著後腦的弧面垂下，動畫只往外飄，不會插進頭裡
+      const knot = V3(0, top + .005, -.095), rg = new THREE.Group(); rg.position.copy(knot); rg.userData.base = 0; head.add(rg); fx.ribbons.push(rg);
+      const rbm = M(wrapC, { side: THREE.DoubleSide, roughness: .8 });
+      for (const s of [-1, 1]) rg.add(part(ribbonGeo(hc, hr * 1.07 + .012, knot, s), rbm));
     }
     if (hat === 'jin') head.add(part(new THREE.SphereGeometry(.088, 14, 10, 0, TAU, 0, Math.PI * .55), mBand, 0, top + .03, -.03));
   }
@@ -3122,8 +3227,10 @@ function animateCharacter(m, e, t, dt) {
   }
   R.head.rotation.y = mv ? 0 : Math.sin(t * .6 + (e.seed || 0)) * .12;
   if (R.blink && dt > 0) { e._bl = (e._bl ?? 1 + Math.random() * 3) - dt; const want = e._bl < .13 ? R.blink.closed : R.blink.open; if (e._bl < 0) e._bl = 2.4 + Math.random() * 3.6; if (R.blink.mat.map !== want) R.blink.mat.map = want; } // 眨眼
-  R.fx.ribbons.forEach((r, i) => { r.rotation.x = r.userData.base + Math.sin(t * 3 + i) * .12 + (mv ? .35 : 0); });
-  R.tails.forEach((tl, i) => { tl.rotation.x = Math.sin(t * 2.4 + i) * .08 + (mv ? .25 : 0); tl.rotation.z = sw * .15; });
+  // 髮帶與腰帶穗只往外飄（不穿進身體），走動時平順地揚起
+  e._rib = (e._rib || 0) + ((mv ? .42 : 0) - (e._rib || 0)) * Math.min(1, dt * 6);
+  R.fx.ribbons.forEach((r, i) => { r.rotation.x = r.userData.base + (Math.sin(t * 2.6 + i) * .5 + .5) * .1 + e._rib; });
+  R.tails.forEach((tl, i) => { tl.rotation.x = -(Math.sin(t * 2.4 + i) * .5 + .5) * .08 - e._rib * .3; tl.rotation.z = sw * .15; });
   if (R.pose === 'hold') { const a = e.act || 0; R.props.position.y = a * .13; for (let i = 0; i < 2; i++) { swingQ.setFromEuler(new THREE.Euler(-a * .38, 0, 0)); R.arms[i].quaternion.copy(R.baseQ[i]).premultiply(swingQ); } R.body.position.y -= a * .012; }
 }
 /* ---------- 動物 ---------- */
